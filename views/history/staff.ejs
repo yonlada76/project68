@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ประวัติ (เจ้าหน้าที่)</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <!-- เพิ่มไอคอน -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
+</head>
+<body class="bg-light">
+  <div class="container py-4">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <h3 class="mb-0">ประวัติสมาชิก (เจ้าหน้าที่)</h3>
+      <a href="/staff-home" class="btn btn-outline-secondary btn-sm">กลับ</a>
+    </div>
+
+    <div class="card p-3 mb-3">
+      <%- include('_filters_staff', { filters, member }) %>
+    </div>
+
+    <div class="card p-3 mb-3">
+      <h5>ยืม–คืน</h5>
+      <%- include('_table_borrow', { rows: borrowRows, showMemberCols: true, staffActions: true }) %>
+    </div>
+
+    <div class="card p-3">
+      <h5>ฟิตเนส</h5>
+      <%- include('_table_fitness', { rows: fitnessRows, showMemberCols: true }) %>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+
+  <!-- ฟังก์ชันกดแจ้งเตือนนักศึกษา -->
+  <script>
+  async function sendOverdueStudent(txId){
+    const btn = event.currentTarget;
+    const old = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> กำลังส่ง...';
+    try{
+      const resp = await fetch('/notifications/overdue/student', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        credentials: 'same-origin',
+        body: JSON.stringify({ tx_id: txId })
+      });
+      let data = {}; try { data = await resp.json(); } catch {}
+      if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
+      btn.classList.remove('btn-outline-danger');
+      btn.classList.add('btn-success');
+      btn.innerHTML = '<i class="bi bi-check2-circle"></i> ส่งแล้ว';
+    }catch(e){
+      alert('ส่งแจ้งเตือนไม่สำเร็จ: ' + (e.message || e));
+      btn.disabled = false; btn.innerHTML = old;
+    }
+  }
+  </script>
+</body>
+</html>

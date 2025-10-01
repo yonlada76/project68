@@ -1,0 +1,97 @@
+<table class="table table-hover table-bordered align-middle">
+  <thead>
+    <tr>
+      <% if (showMemberCols) { %>
+        <th style="min-width:160px">สมาชิก</th>
+        <th style="min-width:120px">ประเภท</th>
+        <th style="min-width:160px">รหัส</th>
+      <% } %>
+      <th>อุปกรณ์</th>
+      <th class="text-end" style="min-width:90px">จำนวน</th>
+      <th style="min-width:120px">ยืมเมื่อ</th>
+      <th style="min-width:220px">สถานะ</th>
+    </tr>
+  </thead>
+  <tbody>
+    <% if (!rows || !rows.length) { %>
+      <tr><td colspan="<%= showMemberCols ? 7 : 4 %>" class="text-center text-muted">ไม่มีข้อมูล</td></tr>
+    <% } else { %>
+      <% rows.forEach(r => { %>
+        <tr>
+          <% if (showMemberCols) { %>
+            <td class="fw-semibold"><i class="bi bi-person me-1"></i> <%= r.full_name || '-' %></td>
+            <td>
+              <% if (r.member_type === 'student') { %>
+                <span class="badge text-bg-success-subtle border border-success-subtle">นักศึกษา</span>
+              <% } else { %>
+                <span class="badge text-bg-danger-subtle border border-danger-subtle">ภายนอก</span>
+              <% } %>
+            </td>
+            <td class="font-monospace">
+              <%= r.member_type === 'student' ? (r.student_id || '-') : (r.citizen_id || '-') %>
+            </td>
+          <% } %>
+
+          <td><i class="bi bi-clipboard-check me-1 text-success"></i><%= r.item_name %></td>
+          <td class="text-end"><%= r.qty %></td>
+          <td><%= r.borrow_date ? new Date(r.borrow_date).toLocaleDateString('th-TH') : '-' %></td>
+
+          <td>
+            <%
+              const bd = r.borrow_date ? new Date(r.borrow_date) : null;
+              const diffDays = bd ? Math.floor((Date.now() - bd.getTime()) / 86400000) : 0;
+            %>
+
+            <% if (r.return_date) { %>
+              <span class="text-success">
+                <i class="bi bi-check2-circle me-1"></i>
+                คืนเมื่อ <%= new Date(r.return_date).toLocaleDateString('th-TH') %>
+              </span>
+
+            <% } else if (r.escalated_at) { %>
+              <div class="d-flex align-items-center gap-2 flex-wrap">
+                <span class="badge text-bg-dark">ส่งถึงคณะแล้ว</span>
+                <small class="text-muted">
+                  บันทึก <%= new Date(r.escalated_at).toLocaleDateString('th-TH') %>
+                </small>
+                <a class="btn btn-sm btn-outline-secondary"
+                   href="/reports/overdue/print?tx=<%= r.id %>"
+                   target="_blank">
+                  <i class="bi bi-printer"></i> พิมพ์เอกสาร
+                </a>
+              </div>
+
+            <% } else if (diffDays >= 7) { %>
+              <div class="d-flex align-items-center gap-2 flex-wrap">
+                <span class="badge text-bg-danger">เกินกำหนด <%= diffDays %> วัน</span>
+                <% if (staffActions) { %>
+                  <button class="btn btn-sm btn-outline-danger" onclick="sendOverdueStudent('<%= r.id %>')">
+                    <i class="bi bi-bell"></i> แจ้งนักศึกษา
+                  </button>
+                  <a class="btn btn-sm btn-outline-secondary"
+                     href="/reports/overdue/print?tx=<%= r.id %>"
+                     target="_blank">
+                    <i class="bi bi-printer"></i> พิมพ์เอกสาร
+                  </a>
+                <% } %>
+              </div>
+
+            <% } else if (diffDays >= 2) { %>
+              <div class="d-flex align-items-center gap-2 flex-wrap">
+                <span class="badge text-bg-warning text-dark">ล่าช้า <%= diffDays %> วัน</span>
+                <% if (staffActions) { %>
+                  <button class="btn btn-sm btn-outline-danger" onclick="sendOverdueStudent('<%= r.id %>')">
+                    <i class="bi bi-bell"></i> แจ้งนักศึกษา
+                  </button>
+                <% } %>
+              </div>
+
+            <% } else { %>
+              <span class="badge text-bg-secondary">ยังไม่คืน (ผ่านมา <%= diffDays %> วัน)</span>
+            <% } %>
+          </td>
+        </tr>
+      <% }) %>
+    <% } %>
+  </tbody>
+</table>

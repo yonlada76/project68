@@ -1,0 +1,28 @@
+<% const rows = Array.isArray(locals.rows) ? locals.rows : []; %>
+<div class="table-responsive">
+<table class="table table-bordered table-hover align-middle">
+  <thead>
+    <tr>
+      <% if (showMemberCols) { %><th>สมาชิก</th><th>ประเภท</th><th>รหัส</th><% } %>
+      <th>วันที่เข้าใช้</th><th class="text-center">ค่าบริการ (฿)</th><th>วิธีชำระ</th>
+    </tr>
+  </thead>
+  <tbody>
+  <% if (!rows.length) { %>
+    <tr><td colspan="<%= showMemberCols ? 6 : 3 %>" class="text-center text-muted">ไม่มีข้อมูล</td></tr>
+  <% } %>
+  <% rows.forEach(r => { %>
+    <tr>
+      <% if (showMemberCols) { %>
+        <td><%= r.full_name || '-' %></td>
+        <td><%= r.member_type==='student' ? 'นักศึกษา' : 'ภายนอก' %></td>
+        <td><%= r.member_type==='student' ? (r.student_id||'-') : (r.citizen_id||'-') %></td>
+      <% } %>
+      <td><%= r.visit_date ? new Date(r.visit_date).toLocaleDateString('th-TH') : '-' %></td>
+      <td class="text-center"><%= r.amount %></td>
+      <td><%= r.pay_method === 'qr' ? 'สแกน QR' : 'เงินสด' %></td>
+    </tr>
+  <% }) %>
+  </tbody>
+</table>
+</div>
