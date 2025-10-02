@@ -7,7 +7,6 @@ import { fileURLToPath } from 'url';
 import { randomUUID } from 'crypto';
 import QRCode from 'qrcode';
 import session from 'express-session';
-import cron from 'node-cron';
 import nodemailer from 'nodemailer';
 
 const { Pool } = pkg;
@@ -42,10 +41,11 @@ pool.query = async (text, params=[]) => {
 
 // === DB bootstrap: created_date + triggers + unique indexes ===
 async function initDb() {
-  // 1) ensure created_date
-  await pool.query(`ALTER TABLE notifications ADD COLUMN IF NOT EXISTS created_date date`);
+  // ให้ใช้ gen_random_uuid() ได้
+  await pool.query(`CREATE EXTENSION IF NOT EXISTS pgcrypto`);
 
-  // 2) trigger ให้ created_date = created_at::date
+  // 1) notifications.created_date + trigger
+  await pool.query(`ALTER TABLE notifications ADD COLUMN IF NOT EXISTS created_date date`);
   await pool.query(`
     CREATE OR REPLACE FUNCTION set_created_date()
     RETURNS trigger AS $$
@@ -62,60 +62,49 @@ async function initDb() {
     FOR EACH ROW
     EXECUTE FUNCTION set_created_date()
   `);
-
-  // 3) เติมย้อนหลัง
   await pool.query(`UPDATE notifications SET created_date = created_at::date WHERE created_date IS NULL`);
 
-  // 4) กันส่งซ้ำ "รายวัน" ต่อ ref/type
+  // 2) กันส่งซ้ำ (รายวัน) ต่อ ref/type
   await pool.query(`
     CREATE UNIQUE INDEX IF NOT EXISTS uq_notif_daily
       ON notifications ((meta->>'ref'), type, created_date)
       WHERE type IN ('overdue_student','overdue_faculty','overdue_staff_2_6')
   `);
 
-  // 5) กันส่งซ้ำต่อรายการ (คน staff): user_id + type + meta.ref
+  // 3) กันส่งซ้ำต่อรายการ (แจ้ง staff) : user_id + type + meta.ref
   await pool.query(`
     CREATE UNIQUE INDEX IF NOT EXISTS uq_notif_once_idx
       ON notifications (user_id, type, (meta->>'ref'))
       WHERE (meta->>'ref') IS NOT NULL
   `);
-  // --- escalate flag ใน transactions ---
-await pool.query(`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS escalated_at timestamptz`);
 
-// --- ตารางระงับการยืม (active hold = released_at IS NULL) ---
-await pool.query(`
-  CREATE TABLE IF NOT EXISTS user_holds (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    reason      TEXT NOT NULL,
-    created_at  timestamptz NOT NULL DEFAULT now(),
-    released_at timestamptz
-  )
-`);
-// ใช้ UUID ใน DB (ถ้ายังไม่มี)
-await pool.query(`CREATE EXTENSION IF NOT EXISTS pgcrypto`);
+  // 4) ธง escalated_at ใน transactions (ส่งถึงคณะแล้ว)
+  await pool.query(`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS escalated_at timestamptz`);
 
-/* ให้ transactions มีคอลัมน์ escalated_at สำหรับสถานะ "ส่งถึงคณะแล้ว" */
-await pool.query(`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS escalated_at timestamptz`);
+  // 5) ตารางระงับสิทธิ์การยืม (active = cleared_at IS NULL)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_holds (
+      id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      user_id     uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      reason      text NOT NULL,
+      created_at  timestamptz NOT NULL DEFAULT now(),
+      cleared_at  timestamptz
+    )
+  `);
 
-/* ตารางระงับสิทธิเพื่อกันยืม (ถือว่า active เมื่อ cleared_at ยังเป็น NULL) */
-await pool.query(`
-  CREATE TABLE IF NOT EXISTS user_holds (
-    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    reason text,
-    created_at timestamptz NOT NULL DEFAULT now(),
-    cleared_at timestamptz
-  )
-`);
-await pool.query(`
-  CREATE INDEX IF NOT EXISTS ix_user_holds_active
-    ON user_holds(user_id)
-    WHERE cleared_at IS NULL
-`);
+  // ดัชนีสำหรับ active holds (ใช้ cleared_at เท่านั้น!)
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS ix_user_holds_active
+      ON user_holds(user_id)
+      WHERE cleared_at IS NULL
+  `);
 
-await pool.query(`CREATE INDEX IF NOT EXISTS idx_user_holds_active ON user_holds(user_id) WHERE released_at IS NULL`);
-await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_user_holds_active ON user_holds(user_id) WHERE released_at IS NULL`);
+  // มีได้แค่ 1 active hold ต่อคน
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_user_holds_one_active
+      ON user_holds(user_id)
+      WHERE cleared_at IS NULL
+  `);
 }
 
 /* =========================
@@ -181,7 +170,6 @@ async function findMemberByAny(raw) {
   return r.rowCount ? r.rows[0] : null;
 }
 
-
 // ดึง user จาก id หรือ code
 async function getUserById(idOrCode) {
   const r = await pool.query(
@@ -196,8 +184,6 @@ async function getUserById(idOrCode) {
   );
   return r.rowCount ? r.rows[0] : null;
 }
-
-
 
 // in-app notification
 // in-app notification (ปรับให้ไม่ล้มถ้าชน unique index)
@@ -218,8 +204,6 @@ async function pushNotif(userIdOrCode, type, title, message, meta = null) {
   );
 }
 
-
-
 // notify user (in-app + email)
 async function notifyUser({ userIdOrCode, type, title, message, meta, emailSubject, emailHtml }) {
   const u = await getUserById(userIdOrCode);
@@ -235,6 +219,33 @@ async function notifyUser({ userIdOrCode, type, title, message, meta, emailSubje
 async function hasActiveHold(userId) {
   const r = await pool.query(
     `SELECT 1 FROM user_holds WHERE user_id = $1::uuid AND cleared_at IS NULL LIMIT 1`,
+    [userId]
+  );
+  return r.rowCount > 0;
+}
+// --- เคลียร์ระงับสิทธิ์ทั้งหมดของผู้ใช้ (ถ้ามี) ---
+async function clearActiveHolds(userId, note='') {
+  const r = await pool.query(
+    `UPDATE user_holds
+        SET cleared_at = now(),
+            reason = COALESCE(reason,'') ||
+                     CASE WHEN $2::text <> '' THEN ' | cleared: '||$2 ELSE '' END
+      WHERE user_id = $1::uuid
+        AND cleared_at IS NULL
+      RETURNING id`,
+    [userId, note]
+  );
+  return r.rowCount > 0; // true ถ้ามีการปลดจริง
+}
+
+// --- ยังมีรายการยืมที่ค้าง (return_date IS NULL) อยู่ไหม ---
+async function hasOpenTransactions(userId) {
+  const r = await pool.query(
+    `SELECT 1
+       FROM transactions
+      WHERE user_id = $1::uuid
+        AND return_date IS NULL
+      LIMIT 1`,
     [userId]
   );
   return r.rowCount > 0;
@@ -326,7 +337,6 @@ async function getHistoryData({ userId = null, from = null, to = null }) {
 
   return { borrowRows, fitnessRows };
 }
-
 
 /* =========================
  * 5) APP MIDDLEWARES
@@ -434,7 +444,6 @@ app.get('/api/notifications', async (req, res) => {
   );
   rows = r.rows;
 }
-
     // ให้ client ใช้ now จากเซิร์ฟเวอร์เสมอ เพื่อลด clock drift
     res.json({ items: rows, now: new Date().toISOString() });
   } catch (e) {
@@ -679,80 +688,146 @@ app.get('/return', isStaff, async (req, res) => {
   res.render('return', { step:'list', member, borrows:r.rows });
 });
 
-// คืนอุปกรณ์ (รองรับคืนบางส่วน)
-app.post('/return/submit', isStaff, async (req, res) => {
+// ยืมอุปกรณ์ (มีเช็ก hold + รองรับเพิ่มจำนวนในแถวเดิม)
+app.post('/borrow/submit', isStaff, async (req, res) => {
   try {
-    const tx_id       = (req.body.tx_id || '').trim();
-    const user_id     = (req.body.member_id || '').trim();
-    const return_qty  = parseInt(req.body.return_qty, 10);
-    const return_date = (req.body.return_date || '').trim();
+    const user_id      = (req.body.member_id || '').trim();     // UUID ผู้ใช้
+    const inventory_id = (req.body.inventory_id || '').trim();  // UUID อุปกรณ์
+    const qtyReq       = parseInt(req.body.qty, 10);             // จำนวนที่ต้องการยืม "เพิ่ม"
+    const borrow_date  = (req.body.borrow_date || '').trim();    // YYYY-MM-DD
 
-    if (!tx_id || !user_id || !Number.isInteger(return_qty) || return_qty <= 0 || !return_date) {
+    // ตรวจอินพุต
+    if (!user_id || !inventory_id || !Number.isInteger(qtyReq) || qtyReq <= 0 || !borrow_date) {
       return res.status(400).send('ข้อมูลไม่ครบหรือไม่ถูกต้อง');
+    }
+
+    // ถูกระงับสิทธิ์อยู่หรือไม่
+    if (await hasActiveHold(user_id)) {
+      return res.status(403).send('บัญชีนี้ถูกระงับการยืมชั่วคราว (ส่งเรื่องถึงคณะ/ค้างคืนเกินกำหนด)');
     }
 
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
 
-      const txRes = await client.query(
-        `SELECT t.id, t.user_id, t.inventory_id, t.qty, t.borrow_date, t.return_date,
-                i.item_name, i.stock
-           FROM transactions t
-           JOIN inventory i ON i.id = t.inventory_id
-          WHERE t.id = $1::uuid
+      // 1) ล็อกอุปกรณ์ไว้ก่อน เพื่อตรวจสต็อก
+      const invRes = await client.query(
+        `SELECT id, item_name, stock
+           FROM inventory
+          WHERE id = $1::uuid
           FOR UPDATE`,
-        [tx_id]
+        [inventory_id]
       );
-      if (!txRes.rowCount) { await client.query('ROLLBACK'); client.release(); return res.status(404).send('ไม่พบรายการยืมที่จะคืน'); }
-
-      const tx = txRes.rows[0];
-      if (String(tx.user_id) !== String(user_id)) { await client.query('ROLLBACK'); client.release(); return res.status(400).send('สมาชิกไม่ตรงกับรายการยืม'); }
-      if (tx.return_date) { await client.query('ROLLBACK'); client.release(); return res.status(400).send('รายการนี้ถูกปิดไปแล้ว'); }
-      if (Number(tx.qty) < return_qty) { await client.query('ROLLBACK'); client.release(); return res.status(400).send('จำนวนที่คืนมากกว่าที่คงค้าง'); }
-
-      await client.query(
-        `UPDATE inventory SET stock = stock + $1 WHERE id = $2::uuid`,
-        [return_qty, tx.inventory_id]
-      );
-
-      if (Number(tx.qty) === return_qty) {
-        await client.query(
-          `UPDATE transactions SET return_date = $1::date WHERE id = $2::uuid`,
-          [return_date, tx_id]
-        );
-      } else {
-        await client.query(
-          `UPDATE transactions SET qty = qty - $1 WHERE id = $2::uuid`,
-          [return_qty, tx_id]
-        );
+      if (!invRes.rowCount) {
+        await client.query('ROLLBACK'); client.release();
+        return res.status(404).send('ไม่พบอุปกรณ์');
       }
+      const inv = invRes.rows[0];
 
-      await client.query('COMMIT');
-      client.release();
+      // 2) มีรายการค้างของ user+item นี้อยู่ไหม (ล็อกแถว)
+      const openRes = await client.query(
+        `SELECT id, qty
+           FROM transactions
+          WHERE user_id = $1::uuid
+            AND inventory_id = $2::uuid
+            AND return_date IS NULL
+          FOR UPDATE`,
+        [user_id, inventory_id]
+      );
 
-      try {
-        await pushNotif(
-          user_id,
-          'borrow_returned',
-          'ยืนยันการคืนอุปกรณ์',
-          `คุณได้คืน ${tx.item_name} จำนวน ${return_qty} ชิ้น วันที่ ${return_date}`,
-          { ref: tx_id }
+      if (openRes.rowCount) {
+        // ----- กรณีมีแถวค้างอยู่: เพิ่ม qty เข้าแถวเดิม -----
+        const tx = openRes.rows[0];
+
+        // เช็กสต็อกพอสำหรับ "qtyReq ที่เพิ่ม" ไหม
+        if (Number(inv.stock) < qtyReq) {
+          await client.query('ROLLBACK'); client.release();
+          return res.status(400).send(`สต็อกไม่พอ (คงเหลือ ${inv.stock})`);
+        }
+
+        // เพิ่มจำนวนในแถวค้าง + หักสต็อกตามส่วนเพิ่ม
+        await client.query(
+          `UPDATE transactions
+              SET qty = qty + $1
+            WHERE id = $2::uuid`,
+          [qtyReq, tx.id]
         );
-      } catch (e) { console.warn('pushNotif (return) failed:', e?.message || e); }
+        await client.query(
+          `UPDATE inventory
+              SET stock = stock - $1
+            WHERE id = $2::uuid`,
+          [qtyReq, inventory_id]
+        );
 
-      return res.redirect('/staff-home');
+        await client.query('COMMIT');
+        client.release();
+
+        // แจ้งเตือนผู้ใช้ (ข้อความระบุว่าเพิ่มจำนวนในรายการเดิม)
+        const msg = `เพิ่มจำนวนการยืม ${inv.item_name} อีก ${qtyReq} ชิ้น (รวมอยู่ในรายการค้างเดิม) วันที่ ${borrow_date}`;
+        await notifyUser({
+          userIdOrCode: user_id,
+          type: 'borrow_created',
+          title: 'ปรับปรุงรายการยืม',
+          message: msg,
+          meta: { ref: tx.id, goto: `/history#tx=${tx.id}` },
+          emailSubject: 'ปรับปรุงรายการยืมอุปกรณ์',
+          emailHtml: `<p>${msg}</p><p>รหัสรายการ: ${tx.id}</p>`
+        });
+
+        return res.redirect('/staff-home');
+
+      } else {
+        // ----- กรณีไม่มีแถวค้าง: สร้างแถวใหม่ -----
+        // เช็กสต็อกพอกับ qtyReq หรือไม่ (แม้มี trigger ก็ควรเช็กก่อน)
+        if (Number(inv.stock) < qtyReq) {
+          await client.query('ROLLBACK'); client.release();
+          return res.status(400).send(`สต็อกไม่พอ (คงเหลือ ${inv.stock})`);
+        }
+
+        const txId = randomUUID();
+
+        // INSERT แถวใหม่ — ไม่ต้องลด stock เอง ปล่อยให้ trigger หลัง INSERT จัดการ
+        await client.query(
+          `INSERT INTO transactions (id, user_id, inventory_id, qty, borrow_date)
+           VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5::date)`,
+          [txId, user_id, inventory_id, qtyReq, borrow_date]
+        );
+
+        await client.query('COMMIT');
+        client.release();
+
+        // แจ้งเตือนผู้ใช้
+        const msg = `คุณได้ยืม ${inv.item_name} จำนวน ${qtyReq} ชิ้น วันที่ ${borrow_date}`;
+        await notifyUser({
+          userIdOrCode: user_id,
+          type: 'borrow_created',
+          title: 'ยืนยันการยืมอุปกรณ์',
+          message: msg,
+          meta: { ref: txId, goto: `/history#tx=${txId}` },
+          emailSubject: 'ยืนยันการยืมอุปกรณ์',
+          emailHtml: `<p>${msg}</p><p>รหัสรายการ: ${txId}</p>`
+        });
+
+        return res.redirect('/staff-home');
+      }
     } catch (e) {
       try { await client.query('ROLLBACK'); } catch {}
       client.release();
-      console.error('TX return error:', e);
-      return res.status(500).send('บันทึกการคืนไม่สำเร็จ');
+
+      // ถ้าพลาดด้วยเหตุผลอื่นให้บอกแบบอ่านง่าย
+      console.error('TX borrow error:', e);
+      if (e?.code === '23505') {
+        return res.status(409).send('มีรายการค้างเดิมของอุปกรณ์นี้อยู่แล้ว');
+      }
+      return res.status(500).send('บันทึกไม่สำเร็จ');
     }
   } catch (e) {
-    console.error('POST /return/submit error:', e);
+    console.error('POST /borrow/submit error:', e);
     return res.status(500).send('server error');
   }
 });
+
+
 
 app.get('/fitness', isStaff, async (req, res) => {
   try {
@@ -1285,6 +1360,7 @@ app.post('/reports/overdue/mark-sent', isStaff, async (req, res) => {
       emailHtml: `<p>รายการยืม ${row.item_name} × ${row.qty} เกินกำหนด ${row.days_overdue} วัน</p>
                   <p>ขณะนี้ได้ส่งหนังสือแจ้งถึงคณะแล้ว และระบบได้ระงับสิทธิ์การยืมชั่วคราว</p>`
     });
+    
 
     // แจ้งเจ้าหน้าที่รวม
     await notifyStaff({

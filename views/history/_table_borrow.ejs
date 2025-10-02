@@ -20,12 +20,16 @@
         <tr>
           <% if (showMemberCols) { %>
             <td class="fw-semibold"><i class="bi bi-person me-1"></i> <%= r.full_name || '-' %></td>
-            <td>
-              <% if (r.member_type === 'student') { %>
-                <span class="badge text-bg-success-subtle border border-success-subtle">นักศึกษา</span>
-              <% } else { %>
-                <span class="badge text-bg-danger-subtle border border-danger-subtle">ภายนอก</span>
-              <% } %>
+           <td>
+            <% if (r.member_type === 'student') { %>
+            <span class="badge rounded-pill bg-success-subtle text-success-emphasis border border-success-subtle px-2 py-1">
+              นักศึกษา
+            </span>
+            <% } else { %>
+            <span class="badge rounded-pill bg-danger-subtle text-danger-emphasis border border-danger-subtle px-2 py-1">
+              ภายนอก
+            </span>
+            <% } %>
             </td>
             <td class="font-monospace">
               <%= r.member_type === 'student' ? (r.student_id || '-') : (r.citizen_id || '-') %>

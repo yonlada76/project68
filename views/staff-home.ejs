@@ -134,106 +134,171 @@
   <script src="https://unpkg.com/html5-qrcode@2.3.8/minified/html5-qrcode.min.js"></script>
   <script>
     /* =========================
-       สแกน QR (เหมือนเดิม)
-    ========================= */
-    const scanModalEl = document.getElementById('scanModal');
-    const scanModal   = new bootstrap.Modal(scanModalEl);
-    const cameraSelect= document.getElementById('cameraSelect');
+   สแกน QR (เฉพาะเจ้าหน้าที่)
+   — ปรับให้เปิดกล้องได้แน่นขึ้น + แสดง error เป็นมิตร
+========================= */
+const scanModalEl = document.getElementById('scanModal');
+const scanModal   = new bootstrap.Modal(scanModalEl);
+const cameraSelect= document.getElementById('cameraSelect');
 
-    let html5Qrcode = null;
-    let targetNext = null;
-    let wantStart  = false;
-    let handled    = false;
-    let currentCamId = null;
+let html5Qrcode = null;
+let targetNext = null;
+let wantStart  = false;
+let handled    = false;
+let currentCamId = null;
 
-    scanModalEl.addEventListener('shown.bs.modal', async () => {
-      if (wantStart) {
-        wantStart = false;
-        await ensureCameraList();
-        await startScanner();
-      }
-    });
+/* helper: โชว์ error ใน modal */
+function showScanError(msg) {
+  let box = document.getElementById('scanError');
+  if (!box) {
+    const div = document.createElement('div');
+    div.id = 'scanError';
+    div.className = 'alert alert-warning mt-2';
+    div.role = 'alert';
+    scanModalEl.querySelector('.modal-body').appendChild(div);
+    box = div;
+  }
+  box.textContent = msg;
+}
 
-    scanModalEl.addEventListener('hidden.bs.modal', stopScanner);
+/* helper: ต้องเป็น https หรือ localhost */
+function isSecureContextForCamera() {
+  return location.protocol === 'https:' ||
+         location.hostname === 'localhost' ||
+         location.hostname === '127.0.0.1';
+}
 
-    document.querySelectorAll('.menu-item[data-next]').forEach(el => {
-      el.addEventListener('click', (e) => {
-        e.preventDefault();
-        targetNext = el.dataset.next; // /borrow /return /fitness
-        handled = false;
-        scanModal.show();
-        wantStart = true;
-      });
-    });
+scanModalEl.addEventListener('shown.bs.modal', async () => {
+  if (wantStart) {
+    wantStart = false;
+    await ensureCameraList();
+    await startScanner();
+  }
+});
 
-    async function ensureCameraList() {
-      try {
-        const cams = await Html5Qrcode.getCameras();
-        cameraSelect.innerHTML = '';
-        cams.forEach((c, idx) => {
-          const opt = document.createElement('option');
-          opt.value = c.id;
-          opt.textContent = c.label || `กล้อง ${idx+1}`;
-          cameraSelect.appendChild(opt);
-        });
-        const back = cams.find(c => /back|rear|environment/i.test(c.label));
-        if (back) cameraSelect.value = back.id;
-        currentCamId = cameraSelect.value || (cams[0]?.id ?? null);
-      } catch (err) {
-        console.error('getCameras error', err);
-      }
+scanModalEl.addEventListener('hidden.bs.modal', stopScanner);
+
+/* ปุ่มเมนู 3 อัน: การยืม/คืน/ฟิตเนส → เปิด modal แล้วเริ่มสแกน */
+document.querySelectorAll('.menu-item[data-next]').forEach(el => {
+  el.addEventListener('click', (e) => {
+    e.preventDefault();
+    targetNext = el.dataset.next; // /borrow /return /fitness
+    handled = false;
+    scanModal.show();
+    wantStart = true;
+  });
+});
+
+/* ดึงรายการกล้อง (รองรับ iOS โดยลองขอสิทธิ์ก่อน) */
+async function ensureCameraList() {
+  try {
+    if (!isSecureContextForCamera()) {
+      showScanError('ต้องเปิดผ่าน HTTPS หรือ localhost เพื่อใช้กล้อง (มือถือ/แท็บเล็ตบังคับ)');
+      return;
     }
 
-    document.getElementById('btnRefreshCams').addEventListener('click', ensureCameraList);
-    cameraSelect.addEventListener('change', async () => {
-      currentCamId = cameraSelect.value;
-      if (html5Qrcode?.isScanning) await startScanner(true);
-    });
+    cameraSelect.innerHTML = '';
+    let cams = [];
+    try { cams = await Html5Qrcode.getCameras(); } catch {}
 
-    async function startScanner(restart = false) {
-      if (!currentCamId) await ensureCameraList();
-      if (!currentCamId) return alert('ไม่พบอุปกรณ์กล้อง');
-
-      if (!html5Qrcode) html5Qrcode = new Html5Qrcode('reader');
-      else if (html5Qrcode.isScanning) await stopScanner();
-
-      const cfg = { fps: 10, qrbox: { width: 240, height: 240 }, aspectRatio: 1.33 };
-
-      const onSuccess = async (decodedText) => {
-        if (handled) return;
-        handled = true;
-        try { await stopScanner(); } catch {}
-        const code = (decodedText || '').trim();
-        const nextUrl = `${targetNext}?member=${encodeURIComponent(code)}`;
-        window.location.replace(nextUrl);
-      };
-
-      const onError = () => {};
-
+    // iOS/Safari จะได้รายการกล้องก็ต่อเมื่อขอสิทธิ์ก่อน
+    if (!cams || cams.length === 0) {
       try {
-        await html5Qrcode.start(currentCamId, cfg, onSuccess, onError);
+        await navigator.mediaDevices.getUserMedia({ video: true });
+        cams = await Html5Qrcode.getCameras();
       } catch (e) {
-        console.error('start error', e);
-        alert('ไม่สามารถเปิดกล้องได้: ' + (e?.message || e));
+        showScanError('เบราว์เซอร์ไม่อนุญาตให้ใช้กล้อง หรืออุปกรณ์ไม่มีกล้อง');
       }
     }
 
-    async function stopScanner() {
-      if (!html5Qrcode) return;
-      if (html5Qrcode.isScanning) {
-        try { await html5Qrcode.stop(); } catch {}
-      }
-      document.getElementById('reader').innerHTML = '';
-    }
-
-    document.getElementById('btnStop').addEventListener('click', stopScanner);
-    document.getElementById('btnManual').addEventListener('click', async () => {
-      const code = prompt('ใส่รหัสสมาชิก/QR:');
-      if (code && targetNext) {
-        await stopScanner();
-        window.location.replace(`${targetNext}?member=${encodeURIComponent(code.trim())}`);
-      }
+    (cams || []).forEach((c, idx) => {
+      const opt = document.createElement('option');
+      opt.value = c.id;
+      opt.textContent = c.label || `กล้อง ${idx+1}`;
+      cameraSelect.appendChild(opt);
     });
+
+    // เลือกกล้องหลังถ้ามี
+    const back = (cams || []).find(c => /back|rear|environment/i.test(c.label));
+    if (back) cameraSelect.value = back.id;
+
+    currentCamId = cameraSelect.value || (cams && cams[0]?.id) || null;
+  } catch (err) {
+    console.error('ensureCameraList error', err);
+    showScanError('ไม่สามารถค้นหากล้องได้: ' + (err?.message || err));
+  }
+}
+
+document.getElementById('btnRefreshCams').addEventListener('click', ensureCameraList);
+cameraSelect.addEventListener('change', async () => {
+  currentCamId = cameraSelect.value || null;
+  if (html5Qrcode && (html5Qrcode.getState && html5Qrcode.getState() === 2)) { // 2 = SCANNING
+    await startScanner(true);
+  }
+});
+
+async function startScanner(restart = false) {
+  try {
+    if (!isSecureContextForCamera()) {
+      showScanError('ต้องเปิดผ่าน HTTPS หรือ localhost เพื่อใช้กล้อง');
+      return;
+    }
+
+    // เตรียม instance
+    if (!html5Qrcode) html5Qrcode = new Html5Qrcode('reader', { verbose: true });
+    // หยุดตัวเดิมหากกำลังสแกน
+    try {
+      if (html5Qrcode.getState && html5Qrcode.getState() === 2) { // 2 = SCANNING
+        await html5Qrcode.stop();
+      }
+    } catch {}
+
+    const cfg = { fps: 10, qrbox: { width: 240, height: 240 }, aspectRatio: 1.33 };
+
+    const onSuccess = async (decodedText) => {
+      if (handled) return;
+      handled = true;
+      try { await stopScanner(); } catch {}
+      const code = (decodedText || '').trim();
+      const nextUrl = `${targetNext}?member=${encodeURIComponent(code)}`;
+      window.location.replace(nextUrl);
+    };
+    const onError = () => {};
+
+    // มี deviceId → ใช้อันนั้น, ไม่มีก็ fallback กล้องหลัง
+    if (currentCamId) {
+      await html5Qrcode.start(currentCamId, cfg, onSuccess, onError);
+    } else {
+      await html5Qrcode.start({ facingMode: 'environment' }, cfg, onSuccess, onError);
+    }
+  } catch (e) {
+    console.error('start error', e);
+    showScanError(
+      'ไม่สามารถเปิดกล้องได้: ' +
+      (e?.message || e) +
+      ' (ตรวจสิทธิ์กล้อง/เปิดผ่าน HTTPS/ลองเปลี่ยนเบราว์เซอร์)'
+    );
+  }
+}
+
+async function stopScanner() {
+  if (!html5Qrcode) return;
+  try {
+    if (html5Qrcode.getState && html5Qrcode.getState() === 2) { // 2 = SCANNING
+      await html5Qrcode.stop();
+    }
+  } catch {}
+  document.getElementById('reader').innerHTML = '';
+}
+
+document.getElementById('btnStop').addEventListener('click', stopScanner);
+document.getElementById('btnManual').addEventListener('click', async () => {
+  const code = prompt('ใส่รหัสสมาชิก/QR:');
+  if (code && targetNext) {
+    await stopScanner();
+    window.location.replace(`${targetNext}?member=${encodeURIComponent(code.trim())}`);
+  }
+});
 
     /* =========================
        ศูนย์แจ้งเตือน (In-App)
